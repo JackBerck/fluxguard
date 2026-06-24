@@ -1,9 +1,10 @@
-package limiter
+package test
 
 import (
 	"context"
 	"testing"
 
+	"github.com/JackBerck/fluxguard/pkg/limiter"
 	"github.com/JackBerck/fluxguard/pkg/storage"
 )
 
@@ -11,7 +12,7 @@ func TestLeakyBucketLimiter_Allow(t *testing.T) {
 	t.Run("allows first requests within capacity", func(t *testing.T) {
 		store := storage.NewMemoryStorage()
 		// capacity=5, rate=100 → requests drain very fast so wait time is tiny
-		limiter := NewLeakyBucket(store, 5, 100)
+		limiter := limiter.NewLeakyBucket(store, 5, 100)
 
 		for i := 0; i < 5; i++ {
 			ok, err := limiter.Allow(context.Background(), "client1")
@@ -29,7 +30,7 @@ func TestLeakyBucketLimiter_Allow(t *testing.T) {
 		// capacity=2, rate=1 → emission interval = 1s
 		// Requests 1 & 2 are queued (wait ~1s and ~2s); request 3 overflows.
 		// We use a cancelled context so the waiting goroutines return immediately.
-		limiter := NewLeakyBucket(store, 2, 1)
+		limiter := limiter.NewLeakyBucket(store, 2, 1)
 
 		bgCtx := context.Background()
 		cancelCtx, cancel := context.WithCancel(bgCtx)
@@ -55,7 +56,7 @@ func TestLeakyBucketLimiter_Allow(t *testing.T) {
 	t.Run("respects context cancellation", func(t *testing.T) {
 		store := storage.NewMemoryStorage()
 		// rate=1 → 1 second between emissions; any queued request waits ~1s
-		limiter := NewLeakyBucket(store, 5, 1)
+		limiter := limiter.NewLeakyBucket(store, 5, 1)
 
 		// Seed one request to push the next into a wait state
 		limiter.Allow(context.Background(), "client3") //nolint:errcheck

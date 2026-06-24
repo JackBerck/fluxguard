@@ -1,17 +1,18 @@
-package limiter
+package test
 
 import (
 	"context"
 	"testing"
 	"time"
 
+	"github.com/JackBerck/fluxguard/pkg/limiter"
 	"github.com/JackBerck/fluxguard/pkg/storage"
 )
 
 func TestTokenBucketLimiter_Allow(t *testing.T) {
 	t.Run("allows up to capacity", func(t *testing.T) {
 		store := storage.NewMemoryStorage()
-		limiter := NewTokenBucket(store, 5, 1)
+		limiter := limiter.NewTokenBucket(store, 5, 1)
 
 		for i := 0; i < 5; i++ {
 			ok, err := limiter.Allow(context.Background(), "client1")
@@ -26,7 +27,7 @@ func TestTokenBucketLimiter_Allow(t *testing.T) {
 
 	t.Run("blocks when bucket is empty", func(t *testing.T) {
 		store := storage.NewMemoryStorage()
-		limiter := NewTokenBucket(store, 3, 1)
+		limiter := limiter.NewTokenBucket(store, 3, 1)
 
 		for i := 0; i < 3; i++ {
 			limiter.Allow(context.Background(), "client2") //nolint:errcheck
@@ -44,7 +45,7 @@ func TestTokenBucketLimiter_Allow(t *testing.T) {
 	t.Run("refills tokens over time", func(t *testing.T) {
 		store := storage.NewMemoryStorage()
 		// rate=10 means a token refills every 100 ms
-		limiter := NewTokenBucket(store, 1, 10)
+		limiter := limiter.NewTokenBucket(store, 1, 10)
 
 		limiter.Allow(context.Background(), "client3") //nolint:errcheck
 
