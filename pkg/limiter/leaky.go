@@ -2,6 +2,7 @@ package limiter
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/JackBerck/fluxguard/pkg/storage"
@@ -19,18 +20,43 @@ type LeakyBucketLimiter struct {
 	store    storage.Storage
 	capacity float64
 	rate     float64
+	log      Logger
+}
+
+// LeakyBucketOption configures a [LeakyBucketLimiter].
+type LeakyBucketOption func(*LeakyBucketLimiter)
+
+// WithLeakyBucketLogger sets the logger used by the limiter.
+// Pass nil to disable logging (the default).
+func WithLeakyBucketLogger(l Logger) LeakyBucketOption {
+	return func(lb *LeakyBucketLimiter) { lb.log = resolveLogger(l) }
 }
 
 // NewLeakyBucket returns a LeakyBucketLimiter backed by store.
 //
-//   - capacity is the maximum number of requests that may wait in the queue.
-//   - rate is the number of requests emitted per second.
-func NewLeakyBucket(store storage.Storage, capacity, rate float64) *LeakyBucketLimiter {
-	return &LeakyBucketLimiter{
+//   - capacity is the maximum number of requests that may wait in the queue; must be > 0.
+//   - rate is the number of requests emitted per second; must be > 0.
+func NewLeakyBucket(store storage.Storage, capacity, rate float64, opts ...LeakyBucketOption) (*LeakyBucketLimiter, error) {
+	if store == nil {
+		return nil, errors.New("fluxguard: store must not be nil")
+	}
+	if capacity <= 0 {
+		return nil, errors.New("fluxguard: capacity must be greater than zero")
+	}
+	if rate <= 0 {
+		return nil, errors.New("fluxguard: rate must be greater than zero")
+	}
+
+	lb := &LeakyBucketLimiter{
 		store:    store,
 		capacity: capacity,
 		rate:     rate,
+		log:      nopLogger{},
 	}
+	for _, opt := range opts {
+		opt(lb)
+	}
+	return lb, nil
 }
 
 // Allow reports whether the request from clientID is permitted.
@@ -40,14 +66,17 @@ func NewLeakyBucket(store storage.Storage, capacity, rate float64) *LeakyBucketL
 func (lb *LeakyBucketLimiter) Allow(ctx context.Context, clientID string) (bool, error) {
 	waitTime, err := lb.store.AllowLeakyBucket(ctx, "leaky:"+clientID, lb.capacity, lb.rate)
 	if err != nil {
+		lb.log.Error("leaky bucket store error", "clientID", clientID, "err", err)
 		return false, err
 	}
 
 	if waitTime < 0 {
+		lb.log.Debug("leaky bucket denied: queue full", "clientID", clientID)
 		return false, nil
 	}
 
 	if waitTime > 0 {
+		lb.log.Debug("leaky bucket queued", "clientID", clientID, "waitSeconds", waitTime)
 		select {
 		case <-ctx.Done():
 			return false, ctx.Err()

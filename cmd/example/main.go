@@ -11,7 +11,9 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"log/slog"
 	"net/http"
+	"os"
 	"strings"
 
 	"github.com/JackBerck/fluxguard/pkg/limiter"
@@ -22,11 +24,11 @@ func clientIP(r *http.Request) string {
 	return strings.Split(r.RemoteAddr, ":")[0]
 }
 
-func rateLimitMiddleware(l interface {
-	Allow(context.Context, string) (bool, error)
-}, next http.HandlerFunc) http.HandlerFunc {
+type allowFunc func(ctx context.Context, clientID string) (bool, error)
+
+func rateLimitMiddleware(allow allowFunc, next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		allowed, err := l.Allow(r.Context(), clientIP(r))
+		allowed, err := allow(r.Context(), clientIP(r))
 		if err != nil {
 			if err == context.Canceled {
 				return
@@ -43,17 +45,28 @@ func rateLimitMiddleware(l interface {
 	}
 }
 
+func must[T any](v T, err error) T {
+	if err != nil {
+		log.Fatalf("fluxguard: failed to initialise limiter: %v", err)
+	}
+	return v
+}
+
 func main() {
+	logger := limiter.NewSlogLogger(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
+		Level: slog.LevelDebug,
+	})))
+
 	store := storage.NewRedisStorage("localhost:6379", "")
 
-	tb := limiter.NewTokenBucket(store, 10, 2)
-	lb := limiter.NewLeakyBucket(store, 5, 1)
-	hl := limiter.NewHybridLimiter(store, limiter.HybridConfig{
+	tb := must(limiter.NewTokenBucket(store, 10, 2, limiter.WithTokenBucketLogger(logger)))
+	lb := must(limiter.NewLeakyBucket(store, 5, 1, limiter.WithLeakyBucketLogger(logger)))
+	hl := must(limiter.NewHybridLimiter(store, limiter.HybridConfig{
 		TokenCapacity: 10,
 		TokenRate:     2,
 		LeakyCapacity: 5,
 		LeakyRate:     1,
-	})
+	}, limiter.WithHybridLogger(logger)))
 
 	handler := func(algo string) http.HandlerFunc {
 		return func(w http.ResponseWriter, r *http.Request) {
@@ -61,9 +74,9 @@ func main() {
 		}
 	}
 
-	http.HandleFunc("/api/data/token", rateLimitMiddleware(tb, handler("token")))
-	http.HandleFunc("/api/data/leaky", rateLimitMiddleware(lb, handler("leaky")))
-	http.HandleFunc("/api/data/hybrid", rateLimitMiddleware(hl, handler("hybrid")))
+	http.HandleFunc("/api/data/token", rateLimitMiddleware(tb.Allow, handler("token")))
+	http.HandleFunc("/api/data/leaky", rateLimitMiddleware(lb.Allow, handler("leaky")))
+	http.HandleFunc("/api/data/hybrid", rateLimitMiddleware(hl.Allow, handler("hybrid")))
 
 	log.Println("listening on http://localhost:8080")
 	log.Fatal(http.ListenAndServe(":8080", nil))

@@ -17,10 +17,19 @@ func defaultHybridConfig() limiter.HybridConfig {
 	}
 }
 
+func mustNewHybridLimiter(t *testing.T, store *storage.MemoryStorage, cfg limiter.HybridConfig) *limiter.HybridLimiter {
+	t.Helper()
+	h, err := limiter.NewHybridLimiter(store, cfg)
+	if err != nil {
+		t.Fatalf("NewHybridLimiter: %v", err)
+	}
+	return h
+}
+
 func TestHybridLimiter_Allow(t *testing.T) {
 	t.Run("allows requests that pass both stages", func(t *testing.T) {
 		store := storage.NewMemoryStorage()
-		h := limiter.NewHybridLimiter(store, defaultHybridConfig())
+		h := mustNewHybridLimiter(t, store, defaultHybridConfig())
 
 		for i := 0; i < 5; i++ {
 			ok, err := h.Allow(context.Background(), "client1")
@@ -41,9 +50,8 @@ func TestHybridLimiter_Allow(t *testing.T) {
 			LeakyCapacity: 10,
 			LeakyRate:     100,
 		}
-		h := limiter.NewHybridLimiter(store, cfg)
+		h := mustNewHybridLimiter(t, store, cfg)
 
-		// Exhaust the token bucket.
 		for i := 0; i < 2; i++ {
 			h.Allow(context.Background(), "client2") //nolint:errcheck
 		}
@@ -63,15 +71,13 @@ func TestHybridLimiter_Allow(t *testing.T) {
 			TokenCapacity: 20,
 			TokenRate:     20,
 			LeakyCapacity: 2,
-			LeakyRate:     1, // slow drain so queue fills quickly
+			LeakyRate:     1,
 		}
-		h := limiter.NewHybridLimiter(store, cfg)
+		h := mustNewHybridLimiter(t, store, cfg)
 
 		cancelCtx, cancel := context.WithCancel(context.Background())
 		cancel()
 
-		// Seed the leaky queue past capacity using a pre-cancelled context so
-		// the goroutine doesn't block.
 		h.Allow(context.Background(), "client3") //nolint:errcheck — slot 0
 		h.Allow(cancelCtx, "client3")            //nolint:errcheck — slot 1
 		h.Allow(cancelCtx, "client3")            //nolint:errcheck — slot 2
@@ -80,7 +86,6 @@ func TestHybridLimiter_Allow(t *testing.T) {
 		if ok {
 			t.Fatal("expected denied at leaky bucket stage, got allowed")
 		}
-		// ok is false either because queue is full or context was cancelled.
 		_ = err
 	})
 
@@ -90,11 +95,10 @@ func TestHybridLimiter_Allow(t *testing.T) {
 			TokenCapacity: 10,
 			TokenRate:     10,
 			LeakyCapacity: 5,
-			LeakyRate:     1, // 1 req/s → next request waits ~1s
+			LeakyRate:     1,
 		}
-		h := limiter.NewHybridLimiter(store, cfg)
+		h := mustNewHybridLimiter(t, store, cfg)
 
-		// Seed one request to push the next into a wait state.
 		h.Allow(context.Background(), "client4") //nolint:errcheck
 
 		ctx, cancel := context.WithCancel(context.Background())
@@ -106,6 +110,37 @@ func TestHybridLimiter_Allow(t *testing.T) {
 		}
 		if err == nil {
 			t.Fatal("expected a context error, got nil")
+		}
+	})
+}
+
+func TestNewHybridLimiter_Validation(t *testing.T) {
+	store := storage.NewMemoryStorage()
+	valid := defaultHybridConfig()
+
+	cases := []struct {
+		name string
+		cfg  limiter.HybridConfig
+	}{
+		{"zero TokenCapacity", limiter.HybridConfig{TokenCapacity: 0, TokenRate: valid.TokenRate, LeakyCapacity: valid.LeakyCapacity, LeakyRate: valid.LeakyRate}},
+		{"zero TokenRate", limiter.HybridConfig{TokenCapacity: valid.TokenCapacity, TokenRate: 0, LeakyCapacity: valid.LeakyCapacity, LeakyRate: valid.LeakyRate}},
+		{"zero LeakyCapacity", limiter.HybridConfig{TokenCapacity: valid.TokenCapacity, TokenRate: valid.TokenRate, LeakyCapacity: 0, LeakyRate: valid.LeakyRate}},
+		{"zero LeakyRate", limiter.HybridConfig{TokenCapacity: valid.TokenCapacity, TokenRate: valid.TokenRate, LeakyCapacity: valid.LeakyCapacity, LeakyRate: 0}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := limiter.NewHybridLimiter(store, tc.cfg)
+			if err == nil {
+				t.Fatal("expected error for invalid config, got nil")
+			}
+		})
+	}
+
+	t.Run("nil store", func(t *testing.T) {
+		_, err := limiter.NewHybridLimiter(nil, valid)
+		if err == nil {
+			t.Fatal("expected error for nil store, got nil")
 		}
 	})
 }
