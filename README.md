@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="public/logo.webp" alt="FluxGuard" width="180" />
+  <img src="logo.webp" alt="FluxGuard" width="180" />
 </p>
 
 <h1 align="center">FluxGuard</h1>
@@ -260,9 +260,3 @@ Run the k6 load test:
 ```bash
 k6 run k6/loadtest_hybrid.js
 ```
-
----
-
-## License
-
-MIT © [JackBerck](https://github.com/JackBerck)
