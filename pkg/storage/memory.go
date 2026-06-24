@@ -6,59 +6,100 @@ import (
 	"time"
 )
 
-// bucket menyimpan status token dari setiap klien (IP/UserID)
-type bucket struct {
+// tokenBucketEntry holds the token count and the last refill timestamp for a
+// single key in the in-memory token bucket store.
+type tokenBucketEntry struct {
 	tokens     float64
 	lastRefill time.Time
 }
 
-// MemoryStorage adalah implementasi Storage menggunakan RAM lokal
-type MemoryStorage struct {
-	mu      sync.Mutex // Pengunci agar thread-safe
-	buckets map[string]*bucket
+// leakyBucketEntry holds the last scheduled emission time for a single key in
+// the in-memory leaky bucket store.
+type leakyBucketEntry struct {
+	lastEmission time.Time
 }
 
-// NewMemoryStorage menginisiasi memori baru
+// MemoryStorage is an in-process implementation of [Storage] backed by a
+// Go map protected by a mutex. It is suitable for single-instance deployments
+// and testing. For distributed deployments use [RedisStorage].
+type MemoryStorage struct {
+	mu           sync.Mutex
+	tokenBuckets map[string]*tokenBucketEntry
+	leakyBuckets map[string]*leakyBucketEntry
+}
+
+// NewMemoryStorage returns a new MemoryStorage ready for use.
 func NewMemoryStorage() *MemoryStorage {
 	return &MemoryStorage{
-		buckets: make(map[string]*bucket),
+		tokenBuckets: make(map[string]*tokenBucketEntry),
+		leakyBuckets: make(map[string]*leakyBucketEntry),
 	}
 }
 
-// AllowTokenBucket berisi rumus matematika Token Bucket
-func (m *MemoryStorage) AllowTokenBucket(ctx context.Context, key string, capacity float64, rate float64) (bool, error) {
-	m.mu.Lock()         // Kunci RAM agar tidak ada request lain yang menulis data ini
-	defer m.mu.Unlock() // Otomatis buka kunci setelah fungsi selesai
+// AllowTokenBucket implements [Storage] using an in-memory token bucket.
+func (m *MemoryStorage) AllowTokenBucket(_ context.Context, key string, capacity, rate float64) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 
 	now := time.Now()
-
-	b, exists := m.buckets[key]
-	if !exists {
-		// Klien baru terdeteksi! Buatkan ember yang penuh
-		m.buckets[key] = &bucket{
-			tokens:     capacity - 1, // Langsung kurangi 1 token untuk request pertama ini
+	entry, ok := m.tokenBuckets[key]
+	if !ok {
+		m.tokenBuckets[key] = &tokenBucketEntry{
+			tokens:     capacity - 1,
 			lastRefill: now,
 		}
-		return true, nil // Izinkan masuk
+		return true, nil
 	}
 
-	// Jika klien lama, hitung berapa detik sejak dia terakhir kali request
-	timePassed := now.Sub(b.lastRefill).Seconds()
-	
-	// Rumus isi ulang token: Waktu berlalu * Kecepatan isi ulang
-	tokensToAdd := timePassed * rate
+	elapsed := now.Sub(entry.lastRefill).Seconds()
+	entry.tokens = min(entry.tokens+elapsed*rate, capacity)
+	entry.lastRefill = now
 
-	b.tokens += tokensToAdd
-	if b.tokens > capacity {
-		b.tokens = capacity // Token tidak boleh meluber melebihi kapasitas ember
+	if entry.tokens >= 1 {
+		entry.tokens--
+		return true, nil
 	}
-	b.lastRefill = now
+	return false, nil
+}
 
-	// Cek apakah tokennya cukup untuk request ini (butuh 1 token)
-	if b.tokens >= 1 {
-		b.tokens--       // Ambil 1 token
-		return true, nil // Izinkan masuk
+// AllowLeakyBucket implements [Storage] using an in-memory leaky bucket.
+// It returns the wait time in seconds (≥ 0) or -1 if the queue is full.
+func (m *MemoryStorage) AllowLeakyBucket(_ context.Context, key string, capacity, rate float64) (float64, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	now := time.Now()
+	emissionInterval := time.Duration(float64(time.Second) / rate)
+
+	entry, ok := m.leakyBuckets[key]
+	if !ok {
+		entry = &leakyBucketEntry{lastEmission: now}
+		m.leakyBuckets[key] = entry
 	}
 
-	return false, nil // Token kurang dari 1, BLOKIR!
+	base := entry.lastEmission
+	if now.After(base) {
+		base = now
+	}
+	nextEmission := base.Add(emissionInterval)
+
+	queueSize := nextEmission.Sub(now).Seconds() / emissionInterval.Seconds()
+	if queueSize > capacity {
+		return -1, nil
+	}
+
+	entry.lastEmission = nextEmission
+
+	waitTime := nextEmission.Sub(now).Seconds() - emissionInterval.Seconds()
+	if waitTime < 0 {
+		waitTime = 0
+	}
+	return waitTime, nil
+}
+
+func min(a, b float64) float64 {
+	if a < b {
+		return a
+	}
+	return b
 }
