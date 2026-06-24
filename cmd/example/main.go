@@ -1,8 +1,10 @@
-// Package main demonstrates FluxGuard's LeakyBucketLimiter in an HTTP server.
+// Package main demonstrates all three FluxGuard limiters running side by side.
 //
-// Run the server and repeatedly GET /api/data to observe rate limiting in action:
-// requests are queued and released at 1 req/s; once the queue (capacity 5) is
-// full, excess requests receive HTTP 429 immediately.
+// Endpoints:
+//
+//	GET /api/data/token  – token bucket only  (capacity=10, rate=2 tok/s)
+//	GET /api/data/leaky  – leaky bucket only  (capacity=5,  rate=1 req/s)
+//	GET /api/data/hybrid – hybrid two-stage   (token: cap=10 rate=2, leaky: cap=5 rate=1)
 package main
 
 import (
@@ -16,14 +18,15 @@ import (
 	"github.com/JackBerck/fluxguard/pkg/storage"
 )
 
-func main() {
-	store := storage.NewRedisStorage("localhost:6379", "")
-	lb := limiter.NewLeakyBucket(store, 5, 1)
+func clientIP(r *http.Request) string {
+	return strings.Split(r.RemoteAddr, ":")[0]
+}
 
-	http.HandleFunc("/api/data", func(w http.ResponseWriter, r *http.Request) {
-		ip := strings.Split(r.RemoteAddr, ":")[0]
-
-		allowed, err := lb.Allow(r.Context(), ip)
+func rateLimitMiddleware(l interface {
+	Allow(context.Context, string) (bool, error)
+}, next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		allowed, err := l.Allow(r.Context(), clientIP(r))
 		if err != nil {
 			if err == context.Canceled {
 				return
@@ -32,14 +35,35 @@ func main() {
 			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 			return
 		}
-
 		if !allowed {
 			http.Error(w, "Too Many Requests", http.StatusTooManyRequests)
 			return
 		}
+		next(w, r)
+	}
+}
 
-		fmt.Fprintf(w, "OK – served request from %s\n", ip)
+func main() {
+	store := storage.NewRedisStorage("localhost:6379", "")
+
+	tb := limiter.NewTokenBucket(store, 10, 2)
+	lb := limiter.NewLeakyBucket(store, 5, 1)
+	hl := limiter.NewHybridLimiter(store, limiter.HybridConfig{
+		TokenCapacity: 10,
+		TokenRate:     2,
+		LeakyCapacity: 5,
+		LeakyRate:     1,
 	})
+
+	handler := func(algo string) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			fmt.Fprintf(w, "OK [%s] – %s\n", algo, clientIP(r))
+		}
+	}
+
+	http.HandleFunc("/api/data/token", rateLimitMiddleware(tb, handler("token")))
+	http.HandleFunc("/api/data/leaky", rateLimitMiddleware(lb, handler("leaky")))
+	http.HandleFunc("/api/data/hybrid", rateLimitMiddleware(hl, handler("hybrid")))
 
 	log.Println("listening on http://localhost:8080")
 	log.Fatal(http.ListenAndServe(":8080", nil))

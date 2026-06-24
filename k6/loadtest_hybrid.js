@@ -12,13 +12,14 @@ export const options = {
         { duration: '5s',  target: 0  },
     ],
     thresholds: {
-        // 90% of responses (including 429s) must arrive within 50 ms.
+        // Blocked requests (429) should respond in under 50 ms — the hybrid
+        // limiter must reject at the token bucket stage before any I/O wait.
         http_req_duration: ['p(90)<50'],
     },
 };
 
 export default function () {
-    const res = http.get('http://localhost:8080/api/data/leaky');
+    const res = http.get('http://localhost:8080/api/data/hybrid');
 
     check(res, {
         'status is 200': (r) => r.status === 200,

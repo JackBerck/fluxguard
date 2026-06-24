@@ -5,4 +5,7 @@
 //     refills at a steady rate.
 //   - [LeakyBucketLimiter] – smooths traffic by queuing requests and releasing
 //     them at a constant rate; rejects requests when the queue is full.
+//   - [HybridLimiter] – combines both algorithms in a two-stage pipeline:
+//     the token bucket absorbs bursts while the leaky bucket smooths output
+//     traffic. Configured via [HybridConfig].
 package limiter
